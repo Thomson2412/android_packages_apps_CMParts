@@ -17,13 +17,21 @@
 
 package org.cyanogenmod.cmparts.gestures;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageInfo;
 import android.content.SharedPreferences;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.UserHandle;
 import android.support.v7.preference.ListPreference;
 import android.support.v7.preference.PreferenceManager;
+import android.util.Log;
 
 import cyanogenmod.hardware.CMHardwareManager;
 import cyanogenmod.hardware.TouchscreenGesture;
@@ -33,8 +41,17 @@ import org.cyanogenmod.cmparts.SettingsPreferenceFragment;
 import org.cyanogenmod.cmparts.utils.ResourceUtils;
 
 import java.lang.System;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 
 public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
+    private static final String TAG = TouchscreenGestureSettings.class.getSimpleName();
+
     private static final String KEY_TOUCHSCREEN_GESTURE = "touchscreen_gesture";
     private static final String TOUCHSCREEN_GESTURE_TITLE = KEY_TOUCHSCREEN_GESTURE + "_%s_title";
 
@@ -52,12 +69,52 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
     }
 
     private void initTouchscreenGestures() {
+        TreeMap<String, String> treemap = new TreeMap<String, String>(new Comparator<String>() {
+            public int compare(String o1, String o2) {
+                return o1.toLowerCase().compareTo(o2.toLowerCase());
+            }
+        });
+
+        List<String> listPackageNames = getPackageNames();
+        for (String name : listPackageNames){
+            treemap.put(getAppnameFromPackagename(name), name);
+        }
+
+        ArrayList<CharSequence> packageNames = new ArrayList<CharSequence>();
+        ArrayList<CharSequence> hrblPackageNames = new ArrayList<CharSequence>();
+
+        CharSequence[] defaultGesturesNames =
+                getContext().getResources().getStringArray(R.array.touchscreen_gesture_action_entries);
+        CharSequence[] defaultGesturesActions =
+                getContext().getResources().getStringArray(R.array.touchscreen_gesture_action_values);
+
+        for(CharSequence cs : defaultGesturesNames){
+            hrblPackageNames.add(cs);
+        }
+        for(CharSequence cs : defaultGesturesActions) {
+            packageNames.add(cs);
+        }
+
+        Iterator ittwo = treemap.entrySet().iterator();
+        while (ittwo.hasNext()) {
+            Map.Entry pairs = (Map.Entry)ittwo.next();
+            hrblPackageNames.add((CharSequence)pairs.getKey());
+            packageNames.add((CharSequence)pairs.getValue());
+            ittwo.remove();
+        }
+
+        final CharSequence[] packageNamesCharsq =
+                packageNames.toArray(new CharSequence[packageNames.size()]);
+        final CharSequence[] hrblPackageNamesCharsq =
+                hrblPackageNames.toArray(new CharSequence[hrblPackageNames.size()]);
+
         final CMHardwareManager manager = CMHardwareManager.getInstance(getContext());
         mTouchscreenGestures = manager.getTouchscreenGestures();
         final int[] actions = getDefaultGestureActions(getContext(), mTouchscreenGestures);
         for (final TouchscreenGesture gesture : mTouchscreenGestures) {
             getPreferenceScreen().addPreference(new TouchscreenGesturePreference(
-                    getContext(), gesture, actions[gesture.id]));
+                    getContext(), gesture, actions[gesture.id],
+                    packageNamesCharsq, hrblPackageNamesCharsq));
         }
     }
 
@@ -67,17 +124,20 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
 
         public TouchscreenGesturePreference(final Context context,
                                             final TouchscreenGesture gesture,
-                                            final int defaultAction) {
+                                            final int defaultAction,
+                                            final CharSequence[] packageNamesCharsq,
+                                            final CharSequence[] hrblPackageNamesCharsq) {
             super(context);
             mContext = context;
             mGesture = gesture;
 
             setKey(buildPreferenceKey(gesture));
-            setEntries(R.array.touchscreen_gesture_action_entries);
-            setEntryValues(R.array.touchscreen_gesture_action_values);
+            //setEntries(R.array.touchscreen_gesture_action_entries);
+            //setEntryValues(R.array.touchscreen_gesture_action_values);
+            setEntries(hrblPackageNamesCharsq);
+            setEntryValues(packageNamesCharsq);
             setDefaultValue(String.valueOf(defaultAction));
-            setIcon(getIconDrawableResourceForAction(defaultAction));
-
+            setIcon(getIconDrawableResourceForAction(String.valueOf(defaultAction)));
             setSummary("%s");
             setDialogTitle(R.string.touchscreen_gesture_action_dialog_title);
             setTitle(ResourceUtils.getLocalizedString(
@@ -86,9 +146,15 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
 
         @Override
         public boolean callChangeListener(final Object newValue) {
-            final int action = Integer.parseInt(String.valueOf(newValue));
+            boolean setEnable = false;
+            try {
+                final int action = Integer.parseInt(String.valueOf(newValue));
+                setEnable = (action > 0);
+            } catch (NumberFormatException e){
+                setEnable = true;
+            }
             final CMHardwareManager manager = CMHardwareManager.getInstance(mContext);
-            if (!manager.setTouchscreenGestureEnabled(mGesture, action > 0)) {
+            if (!manager.setTouchscreenGestureEnabled(mGesture, setEnable)) {
                 return false;
             }
             return super.callChangeListener(newValue);
@@ -99,36 +165,68 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
             if (!super.persistString(value)) {
                 return false;
             }
-            final int action = Integer.parseInt(String.valueOf(value));
-            setIcon(getIconDrawableResourceForAction(action));
+            setIcon(getIconDrawableResourceForAction(value));
             sendUpdateBroadcast(mContext, mTouchscreenGestures);
             return true;
         }
 
-        private int getIconDrawableResourceForAction(final int action) {
-            switch (action) {
+        private Drawable getIconDrawableResourceForAction(final String action) {
+            int actionInt = 0;
+            try {
+                actionInt = Integer.parseInt(String.valueOf(action));
+
+            } catch (NumberFormatException e){
+                actionInt = TouchscreenGestureConstants.ACTION_CUSTOM;
+            }
+            switch (actionInt) {
                 case TouchscreenGestureConstants.ACTION_CAMERA:
-                    return R.drawable.ic_gesture_action_camera;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_camera,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_FLASHLIGHT:
-                    return R.drawable.ic_gesture_action_flashlight;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_flashlight,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_BROWSER:
-                    return R.drawable.ic_gesture_action_browser;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_browser,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_DIALER:
-                    return R.drawable.ic_gesture_action_dialer;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_dialer,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_EMAIL:
-                    return R.drawable.ic_gesture_action_email;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_email,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_MESSAGES:
-                    return R.drawable.ic_gesture_action_messages;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_messages,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_PLAY_PAUSE_MUSIC:
-                    return R.drawable.ic_gesture_action_play_pause;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_play_pause,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_PREVIOUS_TRACK:
-                    return R.drawable.ic_gesture_action_previous_track;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_previous_track,
+                            mContext.getTheme());
                 case TouchscreenGestureConstants.ACTION_NEXT_TRACK:
-                    return R.drawable.ic_gesture_action_next_track;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_next_track,
+                            mContext.getTheme());
+                case TouchscreenGestureConstants.ACTION_CUSTOM:
+                    try {
+                        Drawable icon = mContext.getPackageManager().getApplicationIcon(action);
+                        return resizeIconTo(icon,getResources().getDrawable(
+                                R.drawable.ic_gesture_action_none, mContext.getTheme()));
+                    } catch (PackageManager.NameNotFoundException e){
+                        return getResources().getDrawable(R.drawable.ic_gesture_action_none,
+                                mContext.getTheme());
+                    }
                 default:
                     // No gesture action
-                    return R.drawable.ic_gesture_action_none;
+                    return getResources().getDrawable(R.drawable.ic_gesture_action_none,
+                            mContext.getTheme());
             }
+        }
+
+        private Drawable resizeIconTo(Drawable iconToResize, Drawable sizeSrc) {
+            Bitmap bIconToResize = ((BitmapDrawable)iconToResize).getBitmap();
+            Bitmap bitmapResized = Bitmap.createScaledBitmap(bIconToResize,
+                    sizeSrc.getIntrinsicWidth(), sizeSrc.getIntrinsicHeight(), false);
+            return new BitmapDrawable(getResources(), bitmapResized);
         }
     }
 
@@ -139,11 +237,15 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
 
         final CMHardwareManager manager = CMHardwareManager.getInstance(context);
         final TouchscreenGesture[] gestures = manager.getTouchscreenGestures();
-        final int[] actionList = buildActionList(context, gestures);
+        final String[] actionList = buildActionList(context, gestures);
         for (final TouchscreenGesture gesture : gestures) {
-            manager.setTouchscreenGestureEnabled(gesture, actionList[gesture.id] > 0);
+            try {
+                final int action = Integer.parseInt(String.valueOf(actionList[gesture.id]));
+                manager.setTouchscreenGestureEnabled(gesture, action > 0);
+            } catch (NumberFormatException e){
+                manager.setTouchscreenGestureEnabled(gesture, true);
+            }
         }
-
         sendUpdateBroadcast(context, gestures);
     }
 
@@ -153,7 +255,7 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
     }
 
     private static int[] getDefaultGestureActions(final Context context,
-            final TouchscreenGesture[] gestures) {
+                                                  final TouchscreenGesture[] gestures) {
         final int[] defaultActions = context.getResources().getIntArray(
                 R.array.config_defaultTouchscreenGestureActions);
         if (defaultActions.length >= gestures.length) {
@@ -165,15 +267,15 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
         return filledDefaultActions;
     }
 
-    private static int[] buildActionList(final Context context,
-            final TouchscreenGesture[] gestures) {
-        final int[] result = new int[gestures.length];
+    private static String[] buildActionList(final Context context,
+                                         final TouchscreenGesture[] gestures) {
+        final String[] result = new String[gestures.length];
         final int[] defaultActions = getDefaultGestureActions(context, gestures);
         final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
         for (final TouchscreenGesture gesture : gestures) {
             final String key = buildPreferenceKey(gesture);
             final String defaultValue = String.valueOf(defaultActions[gesture.id]);
-            result[gesture.id] = Integer.parseInt(prefs.getString(key, defaultValue));
+            result[gesture.id] = prefs.getString(key, defaultValue);
         }
         return result;
     }
@@ -183,10 +285,10 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
     }
 
     private static void sendUpdateBroadcast(final Context context,
-            final TouchscreenGesture[] gestures) {
+                                            final TouchscreenGesture[] gestures) {
         final Intent intent = new Intent(TouchscreenGestureConstants.UPDATE_PREFS_ACTION);
         final int[] keycodes = new int[gestures.length];
-        final int[] actions = buildActionList(context, gestures);
+        final String[] actions = buildActionList(context, gestures);
         for (final TouchscreenGesture gesture : gestures) {
             keycodes[gesture.id] = gesture.keycode;
         }
@@ -194,5 +296,34 @@ public class TouchscreenGestureSettings extends SettingsPreferenceFragment {
         intent.putExtra(TouchscreenGestureConstants.UPDATE_EXTRA_ACTION_MAPPING, actions);
         intent.setFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
         context.sendBroadcastAsUser(intent, UserHandle.CURRENT);
+    }
+
+    private List<String> getPackageNames(){
+        List<String> packageNameList = new ArrayList<String>();
+        List<PackageInfo> packs =
+                getContext().getPackageManager().getInstalledPackages(0);
+        for(int i = 0; i < packs.size(); i++){
+            String packageName = packs.get(i).packageName;
+            Intent launchIntent = getContext().getPackageManager()
+                    .getLaunchIntentForPackage(packageName);
+            if(launchIntent != null){
+                packageNameList.add(packageName);
+            }
+        }
+        return packageNameList;
+    }
+
+    private String getAppnameFromPackagename(String packagename){
+        if(packagename == null || "".equals(packagename)){
+            return "FIX THIS"; //getResources().getString(R.string.touchscreen_action_default);
+        }
+        final PackageManager pm = getContext().getPackageManager();
+        ApplicationInfo ai;
+        try {
+            ai = pm.getApplicationInfo(packagename, 0);
+        } catch (final Exception e) {
+            ai = null;
+        }
+        return (String) (ai != null ? pm.getApplicationLabel(ai) : packagename);
     }
 }

@@ -17,6 +17,8 @@
 
 package org.cyanogenmod.cmparts.gestures;
 
+import android.app.KeyguardManager;
+import android.app.KeyguardManager.KeyguardLock;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -36,6 +38,7 @@ import android.Manifest;
 import android.media.AudioManager;
 import android.media.session.MediaSessionLegacyHelper;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
@@ -45,7 +48,7 @@ import android.os.UserHandle;
 import android.os.Vibrator;
 import android.provider.Settings;
 import android.util.Log;
-import android.util.SparseIntArray;
+import android.util.SparseArray;
 import android.view.KeyEvent;
 
 import com.android.internal.os.DeviceKeyHandler;
@@ -59,6 +62,7 @@ public class KeyHandler implements DeviceKeyHandler {
     private static final String TAG = KeyHandler.class.getSimpleName();
 
     private static final String GESTURE_WAKEUP_REASON = "cmparts-gesture-wakeup";
+    private static final String GESTURE_ACTION_KEY = "touchscreen_gesture_action_key";
     private static final int GESTURE_REQUEST = 0;
     private static final int GESTURE_WAKELOCK_DURATION = 3000;
     private static final int EVENT_PROCESS_WAKELOCK_DURATION = 500;
@@ -70,7 +74,7 @@ public class KeyHandler implements DeviceKeyHandler {
     private final CameraManager mCameraManager;
     private final Vibrator mVibrator;
 
-    private final SparseIntArray mActionMapping = new SparseIntArray();
+    private final SparseArray mActionMapping = new SparseArray();
     private final boolean mProximityWakeSupported;
     private SensorManager mSensorManager;
     private Sensor mProximitySensor;
@@ -78,20 +82,52 @@ public class KeyHandler implements DeviceKeyHandler {
     private boolean mDefaultProximity;
     private int mProximityTimeOut;
 
+    private KeyguardManager mKeyguardManager;
+    private KeyguardLock mKeyguardLock;
+    private boolean disableKGbyScreenOn;
+    private boolean isKGDismissed;
+
     private String mRearCameraId;
     private boolean mTorchEnabled;
 
     private final BroadcastReceiver mUpdateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            int[] keycodes = intent.getIntArrayExtra(
-                    TouchscreenGestureConstants.UPDATE_EXTRA_KEYCODE_MAPPING);
-            int[] actions = intent.getIntArrayExtra(
-                    TouchscreenGestureConstants.UPDATE_EXTRA_ACTION_MAPPING);
-            mActionMapping.clear();
-            if (keycodes != null && actions != null && keycodes.length == actions.length) {
-                for (int i = 0; i < keycodes.length; i++) {
-                    mActionMapping.put(keycodes[i], actions[i]);
+            if (intent.getAction().equals(TouchscreenGestureConstants.UPDATE_PREFS_ACTION)) {
+                int[] keycodes = intent.getIntArrayExtra(
+                        TouchscreenGestureConstants.UPDATE_EXTRA_KEYCODE_MAPPING);
+                String[] actions = intent.getStringArrayExtra(
+                        TouchscreenGestureConstants.UPDATE_EXTRA_ACTION_MAPPING);
+                mActionMapping.clear();
+                if (keycodes != null && actions != null && keycodes.length == actions.length) {
+                    for (int i = 0; i < keycodes.length; i++) {
+                        mActionMapping.put(keycodes[i], actions[i]);
+                    }
+                }
+            }
+            else if (intent.getAction().equals(Intent.ACTION_SCREEN_ON)) {
+                Log.d(TAG, "Screen turned on");
+                if(disableKGbyScreenOn) {
+                    Log.d(TAG, "disabling keyguard");
+                    ensureKeyguardManager();
+                    if (!mKeyguardManager.isKeyguardSecure() && !isKGDismissed) {
+                        mKeyguardLock.disableKeyguard();
+                        isKGDismissed = true;
+                        Log.d(TAG, "Disable kg = false");
+                        disableKGbyScreenOn = false;
+                    }
+                }
+            }
+            else if (intent.getAction().equals(Intent.ACTION_SCREEN_OFF)) {
+                Log.d(TAG, "Screen turned off");
+                disableKGbyScreenOn = false;
+                if(isKGDismissed) {
+                    ensureKeyguardManager();
+                    if (!mKeyguardManager.isKeyguardSecure()) {
+                        Log.d(TAG, "reenable Keyguard");
+                        mKeyguardLock.reenableKeyguard();
+                        isKGDismissed = false;
+                    }
                 }
             }
         }
@@ -126,8 +162,10 @@ public class KeyHandler implements DeviceKeyHandler {
             mProximityWakeLock = mPowerManager.newWakeLock(
                     PowerManager.PARTIAL_WAKE_LOCK, "CMPartsProximityWakeLock");
         }
-        mContext.registerReceiver(mUpdateReceiver,
-                new IntentFilter(TouchscreenGestureConstants.UPDATE_PREFS_ACTION));
+        IntentFilter filter = new IntentFilter(TouchscreenGestureConstants.UPDATE_PREFS_ACTION);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        mContext.registerReceiver(mUpdateReceiver, filter);
     }
 
     private class TorchModeCallback extends CameraManager.TorchCallback {
@@ -144,13 +182,23 @@ public class KeyHandler implements DeviceKeyHandler {
         }
     }
 
+    private void ensureKeyguardManager() {
+        if (mKeyguardManager == null) {
+            mKeyguardManager =
+                    (KeyguardManager) mContext.getSystemService(Context.KEYGUARD_SERVICE);
+        }
+        if (mKeyguardLock == null) {
+            mKeyguardLock = mKeyguardManager.newKeyguardLock(Context.KEYGUARD_SERVICE);
+        }
+    }
+
     public boolean handleKeyEvent(final KeyEvent event) {
-        final int action = mActionMapping.get(event.getScanCode(), -1);
-        if (action < 0 || event.getAction() != KeyEvent.ACTION_UP || !hasSetupCompleted()) {
+        final String action = mActionMapping.get(event.getScanCode(), "").toString();
+        if (action.equals("") || event.getAction() != KeyEvent.ACTION_UP || !hasSetupCompleted()) {
             return false;
         }
 
-        if (action != 0 && !mEventHandler.hasMessages(GESTURE_REQUEST)) {
+        if (!action.equals("0") && !mEventHandler.hasMessages(GESTURE_REQUEST)) {
             final Message msg = getMessageForAction(action);
             final boolean proxWakeEnabled = CMSettings.System.getInt(mContext.getContentResolver(),
                     CMSettings.System.PROXIMITY_ON_WAKE, mDefaultProximity ? 1 : 0) == 1;
@@ -172,7 +220,7 @@ public class KeyHandler implements DeviceKeyHandler {
                 Settings.Secure.USER_SETUP_COMPLETE, 0) != 0;
     }
 
-    private void processEvent(final int action) {
+    private void processEvent(final String action) {
         mProximityWakeLock.acquire();
         mSensorManager.registerListener(new SensorEventListener() {
             @Override
@@ -198,16 +246,29 @@ public class KeyHandler implements DeviceKeyHandler {
         }, mProximitySensor, SensorManager.SENSOR_DELAY_FASTEST);
     }
 
-    private Message getMessageForAction(final int action) {
+    private Message getMessageForAction(final String action) {
         Message msg = mEventHandler.obtainMessage(GESTURE_REQUEST);
-        msg.arg1 = action;
+        Bundle b = new Bundle();
+        b.putString(GESTURE_ACTION_KEY, action);
+        msg.setData(b);
         return msg;
     }
 
     private class EventHandler extends Handler {
         @Override
         public void handleMessage(final Message msg) {
-            switch (msg.arg1) {
+            Bundle b = msg.getData();
+            final String action = b.getString(GESTURE_ACTION_KEY);
+            int actionInt = 0;
+            try {
+                actionInt = Integer.parseInt(String.valueOf(action));
+            } catch (NumberFormatException e){
+                actionInt = 0;
+            }
+            switch (actionInt) {
+                case 0:
+                    tryLaunchCustom(action);
+                    break;
                 case TouchscreenGestureConstants.ACTION_CAMERA:
                     launchCamera();
                     break;
@@ -248,6 +309,8 @@ public class KeyHandler implements DeviceKeyHandler {
     }
 
     private void launchBrowser() {
+        Log.d(TAG, "Disable kg = true");
+        disableKGbyScreenOn = true;
         mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
         mPowerManager.wakeUp(SystemClock.uptimeMillis(), GESTURE_WAKEUP_REASON);
         final Intent intent = getLaunchableIntent(
@@ -257,6 +320,8 @@ public class KeyHandler implements DeviceKeyHandler {
     }
 
     private void launchDialer() {
+        Log.d(TAG, "Disable kg = true");
+        disableKGbyScreenOn = true;
         mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
         mPowerManager.wakeUp(SystemClock.uptimeMillis(), GESTURE_WAKEUP_REASON);
         final Intent intent = new Intent(Intent.ACTION_DIAL, null);
@@ -265,6 +330,8 @@ public class KeyHandler implements DeviceKeyHandler {
     }
 
     private void launchEmail() {
+        Log.d(TAG, "Disable kg = true");
+        disableKGbyScreenOn = true;
         mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
         mPowerManager.wakeUp(SystemClock.uptimeMillis(), GESTURE_WAKEUP_REASON);
         final Intent intent = getLaunchableIntent(
@@ -274,6 +341,8 @@ public class KeyHandler implements DeviceKeyHandler {
     }
 
     private void launchMessages() {
+        Log.d(TAG, "Disable kg = true");
+        disableKGbyScreenOn = true;
         mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
         mPowerManager.wakeUp(SystemClock.uptimeMillis(), GESTURE_WAKEUP_REASON);
         final String defaultApplication = Settings.Secure.getString(
@@ -282,8 +351,8 @@ public class KeyHandler implements DeviceKeyHandler {
         final Intent intent = pm.getLaunchIntentForPackage(defaultApplication);
         if (intent != null) {
             startActivitySafely(intent);
-            doHapticFeedback();
         }
+        doHapticFeedback(); //Always do haptic feedback if you also wake screen by gesture
     }
 
     private void toggleFlashlight() {
@@ -298,6 +367,17 @@ public class KeyHandler implements DeviceKeyHandler {
             }
             doHapticFeedback();
         }
+    }
+
+    private void tryLaunchCustom(String packagename) {
+        Log.d(TAG, "Disable kg = true");
+        disableKGbyScreenOn = true;
+        mGestureWakeLock.acquire(GESTURE_WAKELOCK_DURATION);
+        mPowerManager.wakeUp(SystemClock.uptimeMillis(), GESTURE_WAKEUP_REASON);
+        final Intent intent = getLaunchableIntent(mContext.getPackageManager()
+                .getLaunchIntentForPackage(packagename));
+        startActivitySafely(intent);
+        doHapticFeedback();
     }
 
     private void playPauseMusic() {
